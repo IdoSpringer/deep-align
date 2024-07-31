@@ -253,7 +253,7 @@ class MultiBiasLayer(nn.Module):
         trivial = x.mean(dim=1)
         zero_sum = x - trivial.unsqueeze(1)
         trivial_avg = trivial.mean().repeat(x.shape)
-        x = self.weights[0] * trivial_avg + self.weights[1] * x
+        x = self.weights[0] * trivial_avg
         return x
 
 
@@ -273,7 +273,7 @@ class MultiWeightLayer(nn.Module):
         diag_mean = x.diagonal(dim1=1, dim2=2).mean()
         # insert mean on diagonal
         diag_irrep = torch.diag(diag_mean.repeat(x.shape[-1])).repeat([x.shape[0], 1, 1])
-        x = self.weights[0] * ones_irrep + self.weights[1] * diag_irrep + self.weights[2] * x
+        x = self.weights[0] * ones_irrep + self.weights[1] * diag_irrep
         return x
 
 
