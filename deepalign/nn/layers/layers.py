@@ -239,6 +239,44 @@ class CannibalLayer(BaseLayer):
         return new_weights, new_biases
 
 
+class MultiBiasLayer(nn.Module):
+    def __init__(self):
+        self.weights = nn.Parameter(torch.empty(2))
+        self._init_params()
+
+    def _init_params(self):
+        nn.init.xavier_normal_(self.weights)
+
+    def forward(self, x: torch.tensor):
+        # x is a tensor with all k biases at layer l of the same size, where l < M
+        # x shape: [k, dim_{l}]
+        trivial = x.mean(dim=1)
+        zero_sum = x - trivial.unsqueeze(1)
+        trivial_avg = trivial.mean().repeat(x.shape)
+        x = self.weights[0] * trivial_avg + self.weights[1] * x
+        return x
+
+
+class MultiWeightLayer(nn.Module):
+    def __init__(self):
+        self.weights = nn.Parameter(torch.empty(3))
+        self._init_params()
+
+    def _init_params(self):
+        nn.init.xavier_normal_(self.weights)
+
+    def forward(self, x: torch.tensor):
+        # x is a tensor with all k weights at layer l of the same size, where 1 < l < M
+        # x shape: [k, dim_{l}, dim_{l+1}]
+        # trivial irreps of weights are scalar ones and diagonals
+        ones_irrep = x.mean().repeat(x.shape)
+        diag_mean = x.diagonal(dim1=1, dim2=2).mean()
+        # insert mean on diagonal
+        diag_irrep = torch.diag(diag_mean.repeat(x.shape[-1])).repeat([x.shape[0], 1, 1])
+        x = self.weights[0] * ones_irrep + self.weights[1] * diag_irrep + self.weights[2] * x
+        return x
+
+
 class DownSampleCannibalLayer(CannibalLayer):
     def __init__(
         self,
