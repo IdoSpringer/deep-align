@@ -242,12 +242,18 @@ class CannibalLayer(BaseLayer):
 class MultiBiasLayer(nn.Module):
     def __init__(self):
         self.weights = nn.Parameter(torch.empty(2))
+        # self.last_bias_weights = nn.Parameter(torch.empty(dim, dim))
+
         self._init_params()
 
     def _init_params(self):
         nn.init.xavier_normal_(self.weights)
 
     def forward(self, x: torch.tensor):
+        # todo add first and last layer operations
+        # todo make mlp class of this layer
+        # todo this layer should accept weight and biases tuple
+        # todo count parameters (including feature channels) and make sure it matches haggai's theory
         # x is a tensor with all k biases at layer l of the same size, where l < M
         # x shape: [k, dim_{l}]
         trivial = x.mean(dim=1)

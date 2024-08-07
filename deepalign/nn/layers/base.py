@@ -8,16 +8,16 @@ from torch.nn import functional as F
 
 class BaseLayer(nn.Module):
     def __init__(
-        self,
-        in_features,
-        out_features,
-        in_shape: Optional[Tuple] = None,
-        out_shape: Optional[Tuple] = None,
-        bias: bool = True,
-        reduction: str = "mean",
-        n_fc_layers: int = 1,
-        num_heads: int = 8,
-        set_layer: str = "ds",
+            self,
+            in_features,
+            out_features,
+            in_shape: Optional[Tuple] = None,
+            out_shape: Optional[Tuple] = None,
+            bias: bool = True,
+            reduction: str = "mean",
+            n_fc_layers: int = 1,
+            num_heads: int = 8,
+            set_layer: str = "ds",
     ):
         super().__init__()
         assert set_layer in ["ds", "sab"]
@@ -73,7 +73,7 @@ class MAB(nn.Module):
         self.dim_V = dim_V
         self.num_heads = num_heads
         assert (
-            dim_V % num_heads == 0
+                dim_V % num_heads == 0
         ), " dim_V should be divisible without a remainder w.r.t num_heads"
         self.fc_q = nn.Linear(dim_Q, dim_V)
         self.fc_k = nn.Linear(dim_K, dim_V)
@@ -115,12 +115,12 @@ class SetLayer(BaseLayer):
     """
 
     def __init__(
-        self,
-        in_features,
-        out_features,
-        bias: bool = True,
-        reduction: str = "mean",
-        n_fc_layers: int = 1,
+            self,
+            in_features,
+            out_features,
+            bias: bool = True,
+            reduction: str = "mean",
+            n_fc_layers: int = 1,
     ):
         super().__init__(
             in_features=in_features,
@@ -154,14 +154,14 @@ class SetLayer(BaseLayer):
 
 class GeneralSetLayer(BaseLayer):
     def __init__(
-        self,
-        in_features,
-        out_features,
-        bias: bool = True,
-        reduction: str = "mean",
-        n_fc_layers: int = 1,
-        num_heads=8,
-        set_layer="ds",
+            self,
+            in_features,
+            out_features,
+            bias: bool = True,
+            reduction: str = "mean",
+            n_fc_layers: int = 1,
+            num_heads=8,
+            set_layer="ds",
     ):
         super().__init__(
             in_features=in_features,
@@ -213,3 +213,32 @@ class Attn(nn.Module):
         output = (x * attn).sum(-1, keepdim=keepdim)
 
         return output
+
+
+class ScalarLayer(BaseLayer):
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            bias: bool = True,
+            reduction: str = "mean",
+            n_fc_layers: int = 1,
+            num_heads=8,
+            set_layer="ds",
+    ):
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+            num_heads=num_heads,
+            set_layer=set_layer,
+        )
+        self.scalar = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.mlp = self._get_mlp(in_features, out_features, bias=False)
+
+    def forward(self, x):
+        x = self.scalar * x
+        x = self.mlp(x)
+        return x
