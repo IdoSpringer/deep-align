@@ -242,3 +242,32 @@ class ScalarLayer(BaseLayer):
         x = self.scalar * x
         x = self.mlp(x)
         return x
+
+
+class MatrixLayer(BaseLayer):
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            bias: bool = True,
+            reduction: str = "mean",
+            n_fc_layers: int = 1,
+            num_heads=8,
+            set_layer="ds",
+    ):
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+            num_heads=num_heads,
+            set_layer=set_layer,
+        )
+        self.weight = nn.Linear(in_features, in_features, bias=False)
+        self.mlp = self._get_mlp(in_features, out_features, bias=False)
+
+    def forward(self, x):
+        x = self.weight(x)
+        x = self.mlp(x)
+        return x
