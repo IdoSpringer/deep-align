@@ -8,7 +8,13 @@ from deepalign.nn.layers.bias_to_bias import BiasToBiasBlock
 from deepalign.nn.layers.bias_to_weight import BiasToWeightBlock
 from deepalign.nn.layers.weight_to_bias import WeightToBiasBlock
 from deepalign.nn.layers.weight_to_weight import WeightToWeightBlock
-from deepalign.nn.layers.base import BaseLayer, GeneralSetLayer
+
+from typing import Tuple
+
+import torch
+from torch.nn import ModuleDict
+
+from deepalign.nn.layers.base import BaseLayer, GeneralSetLayer, MatrixLayer, ScalarLayer
 
 
 class BN(nn.Module):
@@ -22,20 +28,23 @@ class BN(nn.Module):
         )
 
     def forward(self, x: Tuple[Tuple[torch.tensor], Tuple[torch.tensor]]):
-        weights, biases = x
-        new_weights, new_biases = [None] * len(weights), [None] * len(biases)
-        for i, (m, w) in enumerate(zip(self.weights_bn, weights)):
-            shapes = w.shape
-            new_weights[i] = (
-                m(w.permute(0, 3, 1, 2).flatten(start_dim=2))
-                .permute(0, 2, 1)
-                .reshape(shapes)
-            )
+        outs = []
+        for i in range(2):
+            weights, biases = x[i]
+            new_weights, new_biases = [None] * len(weights), [None] * len(biases)
+            for i, (m, w) in enumerate(zip(self.weights_bn, weights)):
+                shapes = w.shape
+                new_weights[i] = (
+                    m(w.permute(0, 3, 1, 2).flatten(start_dim=2))
+                    .permute(0, 2, 1)
+                    .reshape(shapes)
+                )
 
-        for i, (m, b) in enumerate(zip(self.biases_bn, biases)):
-            new_biases[i] = m(b.permute(0, 2, 1)).permute(0, 2, 1)
-
-        return tuple(new_weights), tuple(new_biases)
+            for i, (m, b) in enumerate(zip(self.biases_bn, biases)):
+                new_biases[i] = m(b.permute(0, 2, 1)).permute(0, 2, 1)
+            out = tuple(new_weights), tuple(new_biases)
+            outs.append(out)
+        return outs
 
 
 class ReLU(nn.Module):
@@ -43,8 +52,12 @@ class ReLU(nn.Module):
         super().__init__()
 
     def forward(self, x: Tuple[Tuple[torch.tensor], Tuple[torch.tensor]]):
-        weights, biases = x
-        return tuple(F.relu(t) for t in weights), tuple(F.relu(t) for t in biases)
+        outs = []
+        for i in range(2):
+            weights, biases = x[i]
+            out = tuple(F.relu(t) for t in weights), tuple(F.relu(t) for t in biases)
+            outs.append(out)
+        return outs
 
 
 class LeakyReLU(nn.Module):
@@ -62,10 +75,13 @@ class Dropout(nn.Module):
         self.p = p
 
     def forward(self, x: Tuple[Tuple[torch.tensor], Tuple[torch.tensor]]):
-        weights, biases = x
-        return tuple(F.dropout(t, p=self.p) for t in weights), tuple(
-            F.dropout(t, p=self.p) for t in biases
-        )
+        outs = []
+        for i in range(2):
+            weights, biases = x[i]
+            out = tuple(F.dropout(t, p=self.p) for t in weights), tuple(
+                F.dropout(t, p=self.p) for t in biases)
+            outs.append(out)
+        return outs
 
 
 class NormalizeAndScale(torch.nn.Module):
@@ -85,24 +101,24 @@ class NormalizeAndScale(torch.nn.Module):
 
 class CannibalLayer(BaseLayer):
     def __init__(
-        self,
-        weight_shapes: Tuple[Tuple[int, int], ...],
-        bias_shapes: Tuple[
-            Tuple[int,],
-            ...,
-        ],
-        in_features,
-        out_features,
-        bias=True,
-        reduction="max",
-        n_fc_layers=1,
-        num_heads=8,
-        set_layer="sab",
-        add_skip=False,
-        init_scale=1.0,
-        init_off_diag_scale_penalty=1.0,
-        diagonal=False,
-        hnp_setup=True,
+            self,
+            weight_shapes: Tuple[Tuple[int, int], ...],
+            bias_shapes: Tuple[
+                Tuple[int,],
+                ...,
+            ],
+            in_features,
+            out_features,
+            bias=True,
+            reduction="max",
+            n_fc_layers=1,
+            num_heads=8,
+            set_layer="sab",
+            add_skip=False,
+            init_scale=1.0,
+            init_off_diag_scale_penalty=1.0,
+            diagonal=False,
+            hnp_setup=True,
     ):
         super().__init__(
             in_features,
@@ -190,7 +206,7 @@ class CannibalLayer(BaseLayer):
             # we extract the ["0", "0"] and check if the len of this set is of size 2
             # (here it is False, i.e., on the diag)
             return (len(set(name.split(".")[2].split("_"))) == 2) or (
-                "skip" not in name
+                    "skip" not in name
             )
         else:
             return True
@@ -239,71 +255,332 @@ class CannibalLayer(BaseLayer):
         return new_weights, new_biases
 
 
-class MultiBiasLayer(nn.Module):
-    def __init__(self):
-        self.weights = nn.Parameter(torch.empty(2))
-        # self.last_bias_weights = nn.Parameter(torch.empty(dim, dim))
+class BiasSharedLayer(BaseLayer):
+    """Mapping non-siamese layers L(b1,b2) -> (b1,b2)"""
 
-        self._init_params()
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            in_shape,
+            out_shape,
+            bias: bool = True,
+            reduction: str = "sum",
+            n_fc_layers: int = 1,
+            num_heads: int = 8,
+            set_layer: str = "sab",
+            is_output_layer=False,
+    ):
+        """
+        :param in_features: input feature dim
+        :param out_features:
+        :param in_shape:
+        :param out_shape:
+        :param bias:
+        :param reduction:
+        :param n_fc_layers:
+        :param num_heads:
+        :param set_layer:
+        :param is_output_layer: indicates that the bias is that of the last layer.
+        :param num_weights: number of weights to align
+        """
+        super().__init__(
+            in_features,
+            out_features,
+            in_shape=in_shape,
+            out_shape=out_shape,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+            num_heads=num_heads,
+            set_layer=set_layer,
+        )
+        self.is_output_layer = is_output_layer
+        if is_output_layer:
+            # i=L-1
+            assert in_shape == out_shape
+            self.weight_matrix = torch.nn.Parameter(data=torch.empty(in_shape[0], out_shape[0]))
+            self.init_model()
+            self.layer = self._get_mlp(
+                in_features=in_shape[0] * in_features,
+                out_features=in_shape[0] * out_features,
+                bias=bias,
+            )
+        else:
+            self.layer = ScalarLayer(
+                in_features=in_features,
+                out_features=out_features,
+            )
 
-    def _init_params(self):
-        nn.init.xavier_normal_(self.weights)
+    def init_model(self):
+        torch.nn.init.xavier_uniform_(self.weight_matrix)
 
-    def forward(self, x: torch.tensor):
-        # todo add first and last layer operations
-        # todo make mlp class of this layer
-        # todo this layer should accept weight and biases tuple
-        # todo count parameters (including feature channels) and make sure it matches haggai's theory
-        # x is a tensor with all k biases at layer l of the same size, where l < M
-        # x shape: [k, dim_{l}]
-        trivial = x.mean(dim=1)
-        zero_sum = x - trivial.unsqueeze(1)
-        trivial_avg = trivial.mean().repeat(x.shape)
-        x = self.weights[0] * trivial_avg
+    def forward(self, x):
+        # (bs, k, d{i+1}, in_features)
+        if self.is_output_layer:
+            # sum all different weights
+            # (bs, d{i+1}, in_features)
+            # Ask Ido.
+            x = self._reduction(x, dim=1)
+            x = self.weight_matrix @ x
+            # (bs, d{i+1} * out_features)
+            x = self.layer(x.flatten(start_dim=1))
+            # (bs, k, d{i+1}, out_features)
+            x = x.reshape(x.shape[0], self.out_shape[0], self.out_features)
+        else:
+            # (bs, k, d{i+1}, in_features)
+            # project to trivial irreps
+            x = x.mean(dim=2).unsqueeze(dim=2).repeat(1, 1, self.out_shape[0], 1)
+            # sum all different weights
+            # (bs, d{i+1}, in_features)
+            x = self._reduction(x, dim=1)
+            # (bs, d{i+1}, out_features)
+            x = self.layer(x)
+            # (bs, k, d{i+1}, out_features)
         return x
 
 
-class MultiWeightLayer(nn.Module):
-    def __init__(self):
-        self.weights = nn.Parameter(torch.empty(3))
-        self._init_params()
+class BiasSharedBlock(BaseLayer):
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            shapes,
+            bias: bool = True,
+            reduction: str = "max",
+            n_fc_layers: int = 1,
+            num_heads: int = 8,
+            set_layer: str = "sab",
+            hnp_setup=True,
+    ):
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+            num_heads=num_heads,
+            set_layer=set_layer,
+        )
+        assert all([len(shape) == 1 for shape in shapes])
 
-    def _init_params(self):
-        nn.init.xavier_normal_(self.weights)
+        self.shapes = shapes
+        self.n_layers = len(shapes)
 
-    def forward(self, x: torch.tensor):
-        # x is a tensor with all k weights at layer l of the same size, where 1 < l < M
-        # x shape: [k, dim_{l}, dim_{l+1}]
-        # trivial irreps of weights are scalar ones and diagonals
-        ones_irrep = x.mean().repeat(x.shape)
-        diag_mean = x.diagonal(dim1=1, dim2=2).mean()
-        # insert mean on diagonal
-        diag_irrep = torch.diag(diag_mean.repeat(x.shape[-1])).repeat([x.shape[0], 1, 1])
-        x = self.weights[0] * ones_irrep + self.weights[1] * diag_irrep
+        self.layers = ModuleDict()
+        # construct layers:
+        for i in range(self.n_layers):
+            self.layers[f"{i}_{i}"] = BiasSharedLayer(
+                in_features=in_features,
+                out_features=out_features,
+                in_shape=shapes[i],
+                out_shape=shapes[i],
+                reduction=reduction,
+                bias=bias,
+                num_heads=num_heads,
+                set_layer=set_layer,
+                n_fc_layers=n_fc_layers,
+                is_output_layer=(i == self.n_layers - 1) and hnp_setup,
+            )
+
+    def forward(self, x: Tuple[torch.tensor], siamese_bias: Tuple[torch.tensor]):
+        out_biases = [[None for _ in range(self.n_layers)] for _ in range(2)]
+        for i in range(self.n_layers):
+            out_bias = self.layers[f"{i}_{i}"](x[i])
+            for j in range(2):
+                out_biases[j][i] = siamese_bias[j][i] + out_bias
+
+        return out_biases
+
+
+class SharedWeightLayer(BaseLayer):
+    """Mapping L(W1_1,W1_2) -> L(W1_1,W1_2)"""
+
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            in_shape,
+            out_shape,
+            bias: bool = True,
+            reduction: str = "max",
+            n_fc_layers: int = 1,
+            last_dim_is_output=False,
+            first_dim_is_output=False,
+
+    ):
+        """
+        :param in_features: input feature dim
+        :param out_features:
+        :param in_shape:
+        :param out_shape:
+        :param bias:
+        :param reduction:
+        :param n_fc_layers:
+        """
+        super().__init__(
+            in_features,
+            out_features,
+            in_shape=in_shape,
+            out_shape=out_shape,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+        )
+        self.last_dim_is_output = last_dim_is_output
+        self.first_dim_is_output = first_dim_is_output
+
+        if self.first_dim_is_output:
+            # w1 -> w1 # d0
+            in_shape = self.in_shape[0]
+            out_shape = self.out_shape[0]
+            self.layer = MatrixLayer(
+                in_shape=in_shape, out_shape=out_shape,
+                in_features=in_features, out_features=out_features, bias=bias
+            )
+        elif self.last_dim_is_output:
+            # wL -> wL  # dL-1
+            self.layer = MatrixLayer(
+                in_shape=self.in_shape[1], out_shape=self.out_shape[1],
+                in_features=in_features, out_features=out_features, bias=bias
+            )
+        else:
+            # wi -> wi
+            in_features = self.in_features
+            out_features = self.out_features
+            self.layer = ScalarLayer(
+                in_features=in_features,
+                out_features=out_features,
+            )
+
+    def forward(self, x):
+        # (bs, k, d0, d1, in_features)
+        if self.first_dim_is_output:
+            # w is d1*d0
+            # v_fixed is constant columns (rows are the same). project to v_fixed by col sum
+            # (bs, k, d0, d1, in_features)
+            x = self._reduction(x, dim=3).unsqueeze(3).repeat(1, 1, 1, self.out_shape[1], 1)
+            # sum all different weights
+            # (bs, d0, d1, in_features)
+            x = x.mean(dim=1)
+            # apply params (d1*d0)(d0*d0) -> (d1*d0)
+            # (bs, d0, d1, out_features)
+            x = x.transpose(-2, -3)
+            x = self.layer(x, from_right=True)
+            # (bs, k, d0, d1, out_features)
+            x = x.reshape(x.shape[0], *self.out_shape, self.out_features)
+            # ( i think we can save extra dimension computation here since rows are the same. not implemented)
+        elif self.last_dim_is_output:
+            # v_fixed is constant rows (columns are the same). project to v_fixed be row sum
+            # (bs, k, dL-1, dL, in_features)
+            x = self._reduction(x, dim=2).unsqueeze(2).repeat(1, 1, self.out_shape[0], 1, 1)
+            # sum all different weights
+            # (bs, d0, d1, in_features)
+            x = x.mean(dim=1)
+            # apply params (dL-1*dL-1)(dL-1*dL) -> (dL-1*dL)
+            # (bs, d0, d1, out_features)
+            x = self.layer(x)
+            # (bs, k, d0, d1, out_features)
+        else:
+            # v fixed is scalar matrices. project to v_fixed by summing all elements
+            # (bs, k, d1, in_features)
+            x = self._reduction(x, dim=2)
+            # (bs, k, in_features)
+            x = self._reduction(x, dim=2)
+            # sum all different weights
+            # (bs, in_features)
+            x = x.mean(dim=1)
+            # apply params
+            # (bs, out_features)
+            x = self.layer(x)
+            # repeat to original size
+            # (bs, dL-1, dL, out_features)
+            x = x.unsqueeze(1).unsqueeze(1).repeat(1, *self.out_shape, 1)
+            # (bs, k, dL-1, dL, out_features)
         return x
+
+
+class WeightSharedBlock(BaseLayer):
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            shapes,
+            bias: bool = True,
+            reduction: str = "max",
+            n_fc_layers: int = 1,
+            num_heads: int = 8,
+            set_layer: str = "sab",
+    ):
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            reduction=reduction,
+            n_fc_layers=n_fc_layers,
+            num_heads=num_heads,
+            set_layer=set_layer,
+        )
+        assert all([len(shape) == 2 for shape in shapes])
+        assert len(shapes) > 2
+        self.shapes = shapes
+        self.n_layers = len(shapes)
+        self.layers = ModuleDict()
+        first_dim_is_output = False
+        last_dim_is_output = False
+        # construct layers:
+        for i in range(self.n_layers):
+            if i == 0:
+                first_dim_is_output = True
+            if i == self.n_layers - 1:
+                last_dim_is_output = True
+            self.layers[f"{i}_{i}"] = SharedWeightLayer(
+                in_features=in_features,
+                out_features=out_features,
+                in_shape=shapes[i],
+                out_shape=shapes[i],
+                reduction=reduction,
+                bias=bias,
+                n_fc_layers=n_fc_layers,
+                last_dim_is_output=last_dim_is_output,
+                first_dim_is_output=first_dim_is_output)
+
+            first_dim_is_output = False
+            last_dim_is_output = False
+
+    def forward(self, x: Tuple[torch.tensor], siamese_weights):
+        out_wights = [[None for _ in range(self.n_layers)] for _ in range(2)]
+        for i in range(self.n_layers):
+            out_weight = self.layers[f"{i}_{i}"](x[i])
+            for j in range(2):
+                out_wights[j][i] = siamese_weights[j][i] + out_weight
+
+        return out_wights
 
 
 class DownSampleCannibalLayer(CannibalLayer):
     def __init__(
-        self,
-        downsample_dim: int,
-        weight_shapes: Tuple[Tuple[int, int], ...],
-        bias_shapes: Tuple[
-            Tuple[int,],
-            ...,
-        ],
-        in_features,
-        out_features,
-        bias=True,
-        reduction="max",
-        n_fc_layers=1,
-        num_heads=8,
-        set_layer="sab",
-        add_skip=False,
-        init_scale=1.0,
-        init_off_diag_scale_penalty=1.0,
-        diagonal=False,
+            self,
+            downsample_dim: int,
+            weight_shapes: Tuple[Tuple[int, int], ...],
+            bias_shapes: Tuple[
+                Tuple[int,],
+                ...,
+            ],
+            in_features,
+            out_features,
+            add_common,
+            bias=True,
+            reduction="max",
+            n_fc_layers=1,
+            num_heads=8,
+            set_layer="sab",
+            add_skip=False,
+            init_scale=1.0,
+            init_off_diag_scale_penalty=1.0,
+            diagonal=False,
     ):
+        self.add_common = add_common
         d0 = weight_shapes[0][0]
         new_weight_shapes = list(weight_shapes)
         new_weight_shapes[0] = (downsample_dim, weight_shapes[0][1])
@@ -351,58 +628,85 @@ class DownSampleCannibalLayer(CannibalLayer):
             out_features=out_features,
             bias=bias,
         )
+        if self.add_common:
+            self.shared_bias = BiasSharedBlock(in_features=in_features, out_features=out_features, shapes=bias_shapes,
+                                               reduction=reduction, n_fc_layers=n_fc_layers, num_heads=num_heads,
+                                               set_layer=set_layer)
+
+            self.shared_weights = WeightSharedBlock(in_features=in_features, out_features=out_features,
+                                                    shapes=weight_shapes, reduction=reduction, n_fc_layers=n_fc_layers,
+                                                    num_heads=num_heads, set_layer=set_layer)
 
     def forward(self, x: Tuple[Tuple[torch.tensor], Tuple[torch.tensor]]):
-        weights, biases = x
 
         # down-sample
         # (bs, d0, d1, in_features)
-        w0 = weights[0]
-        w0_skip = self.skip(w0)
-        bs, d0, d1, _ = w0.shape
-        # (bs, in_features, d1, d0)
-        w0 = w0.permute(0, 3, 2, 1)  # .flatten(start_dim=2)
-        # (bs, in_features, d1, downsample_dim)
-        w0 = self.down_sample(w0)
-        # (bs, downsample_dim, d1, in_features)
-        w0 = w0.permute(
-            0, 3, 2, 1
-        )  # reshape(bs, d1, self.downsample_dim, self.in_features).permute(0, 2, 1, 3)
-        weights = list(weights)
-        weights[0] = w0
+        outs = []
+        all_weights = []
+        for i in range(2):
+            weights, biases = x[i]
+            w0 = weights[0]
+            w0_skip = self.skip(w0)
+            bs, d0, d1, _ = w0.shape
+            # (bs, in_features, d1, d0)
+            w0 = w0.permute(0, 3, 2, 1)  # .flatten(start_dim=2)
+            # (bs, in_features, d1, downsample_dim)
+            w0 = self.down_sample(w0)
+            # (bs, downsample_dim, d1, in_features)
+            w0 = w0.permute(
+                0, 3, 2, 1
+            )  # reshape(bs, d1, self.downsample_dim, self.in_features).permute(0, 2, 1, 3)
+            weights = list(weights)
+            weights[0] = w0
 
-        # cannibal layer out
-        weights, biases = super().forward((tuple(weights), biases))
+            # cannibal layer out
+            weights, biases = super().forward((tuple(weights), biases))
 
-        # up-sample
-        w0 = weights[0]
-        # (bs, out_features, d1, downsample_dim)
-        w0 = w0.permute(0, 3, 2, 1)  # .flatten(start_dim=2)
-        # (bs, out_features, d1, d0)
-        w0 = self.up_sample(w0)
-        # (bs, d0, d1, out_features)
-        w0 = w0.permute(
-            0, 3, 2, 1
-        )  # .reshape(bs, d1, d0, self.out_features).permute(0, 2, 1, 3)
-        weights = list(weights)
-        weights[0] = w0 + w0_skip  # add skip connection
+            # up-sample
+            w0 = weights[0]
+            # (bs, out_features, d1, downsample_dim)
+            w0 = w0.permute(0, 3, 2, 1)  # .flatten(start_dim=2)
+            # (bs, out_features, d1, d0)
+            w0 = self.up_sample(w0)
+            # (bs, d0, d1, out_features)
+            w0 = w0.permute(
+                0, 3, 2, 1
+            )  # .reshape(bs, d1, d0, self.out_features).permute(0, 2, 1, 3)
+            weights = list(weights)
+            weights[0] = w0 + w0_skip  # add skip connection
+            out = weights, biases
+            outs.append(out)
+            all_weights.append(weights)
 
-        return weights, biases
+        if self.add_common:
+            original_biases = [torch.cat((b0.unsqueeze(1), b1.unsqueeze(1)), dim=1) for (b0, b1) in
+                               zip(x[0][1], x[1][1])]
+            original_weights = [torch.cat((w0.unsqueeze(1), w1.unsqueeze(1)), dim=1) for (w0, w1) in
+                                zip(x[0][0], x[1][0])]
+            final_biases = self.shared_bias(original_biases, (outs[0][1], outs[1][1]))
+            final_wights = self.shared_weights(original_weights, (outs[0][0], outs[1][0]))
+            final_outs = [None, None]
+            for j in range(2):
+                new = (final_wights[j], final_biases[j])
+                final_outs[j] = new
+        else:
+            final_outs = outs
+        return final_outs
 
 
 class InvariantLayer(BaseLayer):
     def __init__(
-        self,
-        weight_shapes: Tuple[Tuple[int, int], ...],
-        bias_shapes: Tuple[
-            Tuple[int,],
-            ...,
-        ],
-        in_features,
-        out_features,
-        bias=True,
-        reduction="max",
-        n_fc_layers=1,
+            self,
+            weight_shapes: Tuple[Tuple[int, int], ...],
+            bias_shapes: Tuple[
+                Tuple[int,],
+                ...,
+            ],
+            in_features,
+            out_features,
+            bias=True,
+            reduction="max",
+            n_fc_layers=1,
     ):
         super().__init__(
             in_features,
@@ -416,16 +720,16 @@ class InvariantLayer(BaseLayer):
         n_layers = len(weight_shapes) + len(bias_shapes)
         self.layer = self._get_mlp(
             in_features=(
-                in_features * (n_layers - 3)
-                +
-                # in_features * d0 - first weight matrix
-                in_features * weight_shapes[0][0]
-                +
-                # in_features * dL - last weight matrix
-                in_features * weight_shapes[-1][-1]
-                +
-                # in_features * dL - last bias
-                in_features * bias_shapes[-1][-1]
+                    in_features * (n_layers - 3)
+                    +
+                    # in_features * d0 - first weight matrix
+                    in_features * weight_shapes[0][0]
+                    +
+                    # in_features * dL - last weight matrix
+                    in_features * weight_shapes[-1][-1]
+                    +
+                    # in_features * dL - last bias
+                    in_features * bias_shapes[-1][-1]
             ),
             out_features=out_features,
             bias=bias,
@@ -476,17 +780,17 @@ class InvariantLayer(BaseLayer):
 
 class NaiveInvariantLayer(BaseLayer):
     def __init__(
-        self,
-        weight_shapes: Tuple[Tuple[int, int], ...],
-        bias_shapes: Tuple[
-            Tuple[int,],
-            ...,
-        ],
-        in_features,
-        out_features,
-        bias=True,
-        reduction="max",
-        n_fc_layers=1,
+            self,
+            weight_shapes: Tuple[Tuple[int, int], ...],
+            bias_shapes: Tuple[
+                Tuple[int,],
+                ...,
+            ],
+            in_features,
+            out_features,
+            bias=True,
+            reduction="max",
+            n_fc_layers=1,
     ):
         super().__init__(
             in_features,

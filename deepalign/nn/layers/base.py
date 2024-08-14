@@ -249,6 +249,8 @@ class MatrixLayer(BaseLayer):
             self,
             in_features,
             out_features,
+            in_shape,
+            out_shape,
             bias: bool = True,
             reduction: str = "mean",
             n_fc_layers: int = 1,
@@ -264,10 +266,19 @@ class MatrixLayer(BaseLayer):
             num_heads=num_heads,
             set_layer=set_layer,
         )
-        self.weight = nn.Linear(in_features, in_features, bias=False)
+        # self.weight = nn.Linear(in_features, in_features, bias=False)
+        self.weight = torch.nn.Parameter(torch.empty(in_shape, out_shape))
         self.mlp = self._get_mlp(in_features, out_features, bias=False)
+        self.init_params()
 
-    def forward(self, x):
-        x = self.weight(x)
+    def init_params(self):
+        torch.nn.init.xavier_uniform_(self.weight)
+
+    def forward(self, x, from_right=False):
+        if from_right:
+            x = self.weight @ x
+            x = x.transpose(-2, -3)
+        else:
+            x = (self.weight @ x)
         x = self.mlp(x)
         return x
