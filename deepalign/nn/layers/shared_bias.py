@@ -50,6 +50,8 @@ class BiasSharedLayer(BaseLayer):
         if is_output_layer:
             # i=L-1
             assert in_shape == out_shape
+            self.weight_matrix = torch.nn.Parameter(data=torch.empty(in_shape[0], out_shape[0]))
+            self.init_model()
             self.layer = self._get_mlp(
                 in_features=in_shape[0] * in_features,
                 out_features=in_shape[0] * out_features,
@@ -61,17 +63,21 @@ class BiasSharedLayer(BaseLayer):
                 out_features=out_features,
             )
 
+    def init_model(self):
+        torch.nn.init.xavier_uniform_(self.weight_matrix)
+
     def forward(self, x):
         # (bs, k, d{i+1}, in_features)
-        num_weights = x.shape[1]
         if self.is_output_layer:
             # sum all different weights
             # (bs, d{i+1}, in_features)
+            # Ask Ido.
             x = self._reduction(x, dim=1)
+            x = self.weight_matrix @ x
             # (bs, d{i+1} * out_features)
             x = self.layer(x.flatten(start_dim=1))
             # (bs, k, d{i+1}, out_features)
-            x = x.reshape(x.shape[0], self.out_shape[0], self.out_features).unsqueeze(1).repeat(1, num_weights, 1, 1)
+            x = x.reshape(x.shape[0], self.out_shape[0], self.out_features)
         else:
             # (bs, k, d{i+1}, in_features)
             # project to trivial irreps
@@ -82,7 +88,6 @@ class BiasSharedLayer(BaseLayer):
             # (bs, d{i+1}, out_features)
             x = self.layer(x)
             # (bs, k, d{i+1}, out_features)
-            x = x.unsqueeze(1).repeat(1, num_weights, 1, 1)
         return x
 
 
@@ -129,11 +134,11 @@ class BiasSharedBlock(BaseLayer):
                 is_output_layer=(i == self.n_layers - 1) and hnp_setup,
             )
 
-    def forward(self, x: Tuple[torch.tensor]):
-        out_biases = [
-                         0.0,
-                     ] * len(x)
+    def forward(self, x: Tuple[torch.tensor], siamese_bias: Tuple[torch.tensor]):
+        out_biases = [[None for _ in range(self.n_layers)] for _ in range(2)]
         for i in range(self.n_layers):
-            out_biases[i] = self.layers[f"{i}_{i}"](x[i])
+            out_bias = self.layers[f"{i}_{i}"](x[i])
+            for j in range(2):
+                out_biases[j][i] = siamese_bias[j][i] + out_bias
 
-        return tuple(out_biases)
+        return out_biases

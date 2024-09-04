@@ -5,3 +5,5 @@ from deepalign.nn.layers.layers import (BN, CannibalLayer, DownSampleCannibalLay
                               NaiveInvariantLayer, ReLU)
 from deepalign.nn.layers.weight_to_bias import WeightToBiasBlock
 from deepalign.nn.layers.weight_to_weight import WeightToWeightBlock
+from deepalign.nn.layers.shared_bias import BiasSharedLayer, BiasSharedBlock
+from deepalign.nn.layers.shared_weight import SharedWeightLayer, WeightSharedBlock
